@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>S&P 500 적립식 수익률 시뮬레이터</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>body{font-feature-settings:"ss01" on,"case" on}</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="max-w-4xl mx-auto p-6">
+    <h1 class="text-2xl font-bold mb-2">S&P 500 적립식 수익률 시뮬레이터</h1>
+    <p class="text-sm text-slate-600 mb-6">2025-10-06과 2025-10-24에 각각 180,000원을 투자하고, 이후 매월 24일에 동일 금액을 투자한다고 가정합니다. 입력값은 고정되어 있으며 수수료/세금/환율은 아래 가정으로 반영합니다.</p>
+
+    <div id="summary" class="grid grid-cols-2 gap-3 mb-6">
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">총 납입액</div>
+        <div id="invested" class="text-lg font-semibold">-</div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">평가금액(세후)</div>
+        <div id="value" class="text-lg font-semibold">-</div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">평가손익(세후)</div>
+        <div id="pnl" class="text-lg font-semibold">-</div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">수익률(세후)</div>
+        <div id="roi" class="text-lg font-semibold">-</div>
+      </div>
+    </div>
+
+    <canvas id="chart" height="120"></canvas>
+
+    <p id="notice" class="text-xs text-amber-600 mt-4 hidden"></p>
+    <p class="text-xs text-slate-400 mt-2">가격: Stooq ^spx, 환율: exchangerate.host / frankfurter.app. 배당은 미반영.</p>
+  </div>
+
+  <script>
+    var TAX_RATE = 0.22;        // 해외주식 양도세(지방세 포함) 가정 22%
+    var TAX_DED_KRW = 2500000;  // 연 250만원 기본공제 가정
+
+    function fmtKRW(v){ return new Intl.NumberFormat('ko-KR',{style:'currency',currency:'KRW',maximumFractionDigits:0}).format(v); }
+    function ymd(d){ return d.toISOString().slice(0,10); }
+    function addMonths(d,m){ var x=new Date(d); x.setUTCMonth(x.getUTCMonth()+m); return x; }
+
+    async function fetchSPX(){
+      var urls=[
+        'https://stooq.com/q/d/l/?s=%5Espx&i=d',
+        'https://r.jina.ai/http://stooq.com/q/d/l/?s=%5Espx&i=d',
+        'https://r.jina.ai/http://stooq.pl/q/d/l/?s=%5Espx&i=d'
+      ];
+      function parseCsv(text){
+        var lines = text.trim().split(/\r?\n/).filter(function(l){return /\d{4}-\d{2}-\d{2},/.test(l) || /^date,open,high,low,close/i.test(l)});
+        if(/^date,open,high,low,close/i.test(lines[0])) lines.shift();
+        var rows = lines.map(function(l){ var parts=l.split(','); return {date:parts[0], close:Number(parts[4])}; })
+                        .filter(function(r){return Number.isFinite(r.close)});
+        if(rows.length===0) throw new Error('SPX CSV parse error');
+        return rows;
+      }
+      for(var i=0;i<urls.length;i++){
+        try{
+          var res = await fetch(urls[i],{cache:'no-cache'});
+          if(!res.ok) throw 0; var txt = await res.text(); return parseCsv(txt);
+        }catch(e){}
+      }
+      throw new Error('S&P 500 가격을 가져오지 못했습니다.');
+    }
+
+    async function fetchUSDKRW(fromYMD, toYMD){
+      var eps=[
+        'https://api.exchangerate.host/timeseries?base=USD&symbols=KRW&start_date='+fromYMD+'&end_date='+toYMD,
+        'https://api.frankfurter.app/'+fromYMD+'..'+toYMD+'?from=USD&to=KRW'
+      ];
+      for(var i=0;i<eps.length;i++){
+        try{
+          var r = await fetch(eps[i],{cache:'no-cache'}); if(!r.ok) throw 0; var j = await r.json();
+          var rates = {}; var k;
+          if(j.rates){
+            for(k in j.rates){ if(j.rates.hasOwnProperty(k)){ var obj=j.rates[k]; var v = obj.KRW || obj['KRW']; if(v) rates[k]=Number(v); }}
+          }
+          var keys = Object.keys(rates).sort(); if(keys.length===0) throw 0;
+          var arr = keys.map(function(k){return {date:k, rate:rates[k]};}).sort(function(a,b){return a.date<b.date?-1:1});
+          return {
+            getRateOnOrBefore: function(d){
+              var lo=0, hi=arr.length-1, ans=null; var mid;
+              while(lo<=hi){ mid=(lo+hi>>1); if(arr[mid].date<=d){ ans=arr[mid]; lo=mid+1; } else { hi=mid-1; } }
+              return ans? ans.rate : null;
+            },
+            firstDate: arr[0].date,
+            lastDate: arr[arr.length-1].date
+          };
+        }catch(e){}
+      }
+      throw new Error('USD/KRW 환율을 가져오지 못했습니다.');
+    }
+
+    async function run(){
+      try{
+        var spx = await fetchSPX();
+        var plans=[ {date:'2025-10-06',amountKRW:180000}, {date:'2025-10-24',amountKRW:180000} ];
+        var cur = new Date(Date.UTC(2025,10,24)); // 2025-11-24
+        var lastYMD = spx[spx.length-1].date;
+        while(ymd(cur).slice(0,7) <= lastYMD.slice(0,7)){
+          var t = spx.find(function(r){return r.date>=ymd(cur)});
+          if(t) plans.push({date:t.date, amountKRW:180000});
+          cur = addMonths(cur,1);
+        }
+        var fx = await fetchUSDKRW(plans[0].date, lastYMD);
+
+        var fills=[], totalUnits=0, investedKRW=0;
+        for(var i=0;i<plans.length;i++){
+          var p = plans[i]; var trade = spx.find(function(r){return r.date>=p.date}); if(!trade) continue;
+          var rate = fx.getRateOnOrBefore(trade.date); if(!Number.isFinite(rate)) continue;
+          var priceKRW = trade.close * rate; var units = p.amountKRW / priceKRW;
+          totalUnits += units; investedKRW += p.amountKRW;
+          fills.push({date:trade.date, priceUSD:trade.close, rateKRW:rate, priceKRW:priceKRW, amountKRW:p.amountKRW, units:units});
+        }
+
+        var curve=[], accUnits=0, j=0; var sortedFills=fills.slice().sort(function(a,b){return a.date<b.date?-1:1});
+        for(var k=0;k<spx.length;k++){
+          var r = spx[k];
+          while(j<sortedFills.length && sortedFills[j].date===r.date){ accUnits += sortedFills[j].units; j++; }
+          if(accUnits>0){ var rate2 = fx.getRateOnOrBefore(r.date); if(Number.isFinite(rate2)) curve.push({date:r.date, valueKRW: accUnits * r.close * rate2}); }
+        }
+
+        var lastRate = fx.getRateOnOrBefore(lastYMD);
+        var currentValueKRW = totalUnits * spx[spx.length-1].close * lastRate;
+        var grossGain = currentValueKRW - investedKRW;
+        var taxable = Math.max(0, grossGain - TAX_DED_KRW);
+        var tax = taxable * TAX_RATE;
+        var netValueKRW = currentValueKRW - Math.max(0, tax);
+        var pnlAfterTax = netValueKRW - investedKRW;
+        var roiAfterTax = investedKRW>0 ? pnlAfterTax / investedKRW : 0;
+
+        document.getElementById('invested').textContent = fmtKRW(investedKRW);
+        document.getElementById('value').textContent = fmtKRW(netValueKRW);
+        document.getElementById('pnl').textContent = (pnlAfterTax>=0?'+':'')+fmtKRW(Math.abs(pnlAfterTax));
+        document.getElementById('roi').textContent = (roiAfterTax*100).toFixed(2)+'%';
+
+        var ctx=document.getElementById('chart');
+        new Chart(ctx,{ type:'line', data:{ labels:curve.map(function(p){return p.date}), datasets:[{ data:curve.map(function(p){return p.valueKRW}), label:'평가금액(세전·원화)', borderWidth:2, tension:0.18, pointRadius:0 }] }, options:{ plugins:{ legend:{display:false} }, scales:{ y:{ ticks:{ callback:function(v){return new Intl.NumberFormat('ko-KR').format(v)} } } } } });
+
+        var n=document.getElementById('notice'); n.classList.remove('hidden');
+        n.textContent = '가정: 환율은 일별 USD/KRW(가장 가까운 이전 영업일)로 환산, 세금은 오늘 전액 매도 가정의 양도세 단순 계산(기본공제 '+fmtKRW(TAX_DED_KRW)+', 세율 '+(TAX_RATE*100).toFixed(0)+'%). 배당 및 원천징수는 미반영.';
+
+      }catch(err){
+        console.error(err);
+        var n2=document.getElementById('notice'); n2.classList.remove('hidden');
+        n2.textContent = '데이터/계산 오류: ' + (err.message||String(err));
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
