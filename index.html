@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>S&P 500 적립식 수익률 시뮬레이터</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>body{font-feature-settings:"ss01" on,"case" on}</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+  <div class="max-w-4xl mx-auto p-6">
+    <h1 class="text-2xl font-bold mb-2">S&P 500 적립식 수익률 시뮬레이터</h1>
+    <p class="text-sm text-slate-600 mb-6">2025-10-06과 2025-10-24에 각각 180,000원을 투자하고, 이후 매월 24일에 동일 금액을 투자한다고 가정합니다. 입력값은 고정되어 있으며 수수료/세금/환율은 무시합니다.</p>
+
+    <div id="summary" class="grid grid-cols-2 gap-3 mb-6">
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">총 납입액</div>
+        <div id="invested" class="text-lg font-semibold">-</div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">평가금액</div>
+        <div id="value" class="text-lg font-semibold">-</div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">평가손익</div>
+        <div id="pnl" class="text-lg font-semibold">-</div>
+      </div>
+      <div class="bg-white rounded-lg shadow p-3">
+        <div class="text-slate-500 text-sm">수익률</div>
+        <div id="roi" class="text-lg font-semibold">-</div>
+      </div>
+    </div>
+
+    <canvas id="chart" height="120"></canvas>
+
+    <p id="notice" class="text-xs text-amber-600 mt-4 hidden"></p>
+    <p class="text-xs text-slate-400 mt-2">데이터 소스: <a href="https://stooq.com/" class="underline" target="_blank">Stooq</a> (^spx). CORS 문제 시 프록시를 사용합니다.</p>
+  </div>
+
+  <script>
+    const fmtKRW = v => new Intl.NumberFormat('ko-KR',{style:'currency',currency:'KRW',maximumFractionDigits:0}).format(v);
+
+    async function fetchSPX(){
+      const CANDIDATES = [
+        'https://stooq.com/q/d/l/?s=%5Espx&i=d',
+        'https://r.jina.ai/http://stooq.com/q/d/l/?s=%5Espx&i=d',
+        'https://r.jina.ai/http://stooq.pl/q/d/l/?s=%5Espx&i=d'
+      ];
+
+      async function parseCsv(text){
+        const lines = text.trim().split(/\r?\n/).filter(l=>/\d{4}-\d{2}-\d{2},/.test(l) || /^date,open,high,low,close/i.test(l));
+        if(lines.length===0) throw new Error('No CSV content');
+        if(/^date,open,high,low,close/i.test(lines[0])) lines.shift();
+        const rows = lines.map(l=>{
+          const [date, open, high, low, close] = l.split(',');
+          return { date, close: Number(close) };
+        }).filter(r=>Number.isFinite(r.close));
+        if(rows.length===0) throw new Error('CSV parse error');
+        return rows;
+      }
+
+      let lastError;
+      for(const url of CANDIDATES){
+        try{
+          const res = await fetch(url, { cache: 'no-cache' });
+          if(!res.ok) throw new Error('HTTP '+res.status);
+          const text = await res.text();
+          const rows = await parseCsv(text);
+          return rows;
+        }catch(e){ lastError = e; console.warn('fetchSPX fallback', url, e); }
+      }
+      throw lastError || new Error('가격 데이터를 가져오지 못했습니다.');
+    }
+
+    function ymd(d){return d.toISOString().slice(0,10);}
+    function addMonths(d,m){const x=new Date(d);x.setUTCMonth(x.getUTCMonth()+m);return x;}
+
+    function simulate(rows){
+      const plans=[
+        {date:'2025-10-06',amount:180000},
+        {date:'2025-10-24',amount:180000}
+      ];
+      // Recurring from 2025-11-24 onwards up to last data month
+      let cur = new Date(Date.UTC(2025,10,24)); // 2025-11-24
+      const lastYMD = rows[rows.length-1].date;
+      const findTrade = (d) => rows.find(r=>r.date>=d) || null;
+      while(ymd(cur).slice(0,7) <= lastYMD.slice(0,7)){
+        const t = findTrade(ymd(cur));
+        if(t) plans.push({date:t.date, amount:180000});
+        cur = addMonths(cur,1);
+      }
+
+      const fills=[]; let units=0, invested=0;
+      for(const p of plans){
+        const t = findTrade(p.date); if(!t) continue;
+        const u = p.amount / t.close;
+        if(!Number.isFinite(u)) continue;
+        units += u; invested += p.amount; fills.push({date:t.date, price:t.close, units:u});
+      }
+
+      const curPrice = rows[rows.length-1].close;
+      const val = units * curPrice;
+      const pnl = val - invested;
+      const roi = invested>0 ? pnl/invested : 0;
+
+      // Build equity curve
+      let accUnits=0, i=0; const curve=[];
+      for(const r of rows){
+        while(i < fills.length && fills[i].date === r.date){ accUnits += fills[i].units; i++; }
+        if(accUnits>0) curve.push({date:r.date, value: accUnits * r.close});
+      }
+      return {invested, val, pnl, roi, fills, curve};
+    }
+
+    function showNotice(msg){
+      const el=document.getElementById('notice');
+      el.textContent = msg; el.classList.remove('hidden');
+    }
+
+    async function run(){
+      try{
+        const data = await fetchSPX();
+        const r = simulate(data);
+        if(!Number.isFinite(r.val)) throw new Error('계산 중 유효하지 않은 값이 생성되었습니다.');
+        document.getElementById('invested').textContent = fmtKRW(r.invested);
+        document.getElementById('value').textContent = fmtKRW(r.val);
+        document.getElementById('pnl').textContent = (r.pnl>=0?'+':'')+fmtKRW(Math.abs(r.pnl));
+        document.getElementById('roi').textContent = (r.roi*100).toFixed(2)+'%';
+
+        const ctx=document.getElementById('chart');
+        new Chart(ctx,{
+          type:'line',
+          data:{labels:r.curve.map(p=>p.date),datasets:[{data:r.curve.map(p=>p.value),label:'포트폴리오 평가금액',borderWidth:2,tension:0.18,pointRadius:0}]},
+          options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>new Intl.NumberFormat('ko-KR').format(v)}}}}
+        });
+      }catch(err){
+        console.error(err);
+        showNotice('데이터를 불러오거나 계산하는 중 문제가 발생했습니다: '+ (err.message||String(err)));
+        document.getElementById('invested').textContent = '-';
+        document.getElementById('value').textContent = '-';
+        document.getElementById('pnl').textContent = '-';
+        document.getElementById('roi').textContent = '-';
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
