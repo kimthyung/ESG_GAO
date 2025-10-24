@@ -114,7 +114,7 @@
         var spx = await fetchSPX();
 
         // 1) 고정 플랜 입력을 KST 기준으로 설정
-        var kstPlans=[ {kstDate:'2025-10-06', amountKRW:180000}, {kstDate:'2025-10-24', amountKRW:180000} ];
+        var kstPlans=[ {kstDate:'2025-10-06', amountKRW:180000}, {kstDate:'2025-10-23', amountKRW:180000} ];
         // 2) 매월 24일 KST 23:59 입금 → ET 날짜로 변환 후 첫 거래일 체결
         var curKst = new Date(Date.UTC(2025,10,24,14,59,0)); // 2025-11-24 23:59 KST = UTC 14:59
         var lastYMD = spx[spx.length-1].date;
